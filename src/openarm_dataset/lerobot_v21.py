@@ -33,6 +33,8 @@ FFMPEG_CODEC = "libx264"
 VIDEO_PIX_FMT = "yuv420p"
 VIDEO_CODEC = "h264"
 
+METADATA_DIR = "meta"
+
 # config for image stats estimation
 IMAGE_STATS_MIN_SAMPLES = 100
 IMAGE_STATS_MAX_SAMPLES = 10_000
@@ -60,79 +62,6 @@ def _get_joint_names(component, joints):
     if component is None:
         return [f"{joint}.pos" for joint in joints]
     return [f"{component}_{joint}.pos" for joint in joints]
-
-
-def _collect_keys_and_joint_names(dataset: Dataset):
-    keys = []
-    joint_names = []
-    for name, embodiment in dataset.meta.equipment.embodiments.items():
-        if embodiment.components:
-            for component in embodiment.components:
-                for attribute in embodiment.attributes:
-                    key = f"{name}/{component}/{attribute}"
-                    keys.append(key)
-                    joint_names.extend(_get_joint_names(component, embodiment.joints))
-        else:
-            for attribute in embodiment.attributes:
-                key = f"{name}/{attribute}"
-                keys.append(key)
-                joint_names.extend(_get_joint_names(None, embodiment.joints))
-    return keys, joint_names
-
-
-def _collect_downsampled_data(
-    dataset: Dataset, fps: int, joint_keys, success_only=False
-):
-    records = []
-    for episode_index in range(dataset.meta.num_episodes):
-        success = dataset.meta.episodes[episode_index]["success"]
-        if not success and success_only:
-            continue
-        samples = dataset.sample(hz=fps, episode_index=episode_index)
-        num_frames = len(samples)
-        sampled_obs = [
-            np.concatenate([s.obs[k] for k in joint_keys], axis=0).astype(np.float32)
-            for s in samples
-        ]
-        sampled_actions = [
-            np.concatenate([s.action[k] for k in joint_keys], axis=0).astype(np.float32)
-            for s in samples
-        ]
-        sampled_cameras = {
-            k: [Path(s.cameras[k].path) for s in samples] for k in dataset.camera_names
-        }
-        record = (
-            episode_index,
-            num_frames,
-            sampled_obs,
-            sampled_actions,
-            sampled_cameras,
-        )
-        records.append(record)
-    return records
-
-
-def _build_remaps(dataset: Dataset, records):
-    """Build remapping dicts from original episode/task indices to contiguous indices.
-
-    When records is a filtered subset of episodes (e.g., success_only=True),
-    original indices may be sparse. LeRobot v2.1 expects episode/task indices
-    to be contiguous starting from 0. When records contains all episodes the
-    returned maps are the identity.
-    """
-    remap_episode_index = {original: new for new, (original, *_) in enumerate(records)}
-    seen = set()
-    used_task_indices = []
-    for original_episode_index, *_ in records:
-        original_task_index = dataset.meta.episodes[original_episode_index][
-            "task_index"
-        ]
-        if original_task_index not in seen:
-            seen.add(original_task_index)
-            used_task_indices.append(original_task_index)
-    used_task_indices.sort()
-    remap_task_index = {original: new for new, original in enumerate(used_task_indices)}
-    return remap_episode_index, remap_task_index
 
 
 def _get_chunk_name(episode_id: int):
@@ -330,321 +259,435 @@ def _describe_images(image_paths: list[Path]):
     return stats
 
 
-def _calc_episode_stats(
-    sampled_obs,
-    sampled_actions,
-    episode_index: int,
-    gidx: int,
-    task_index,
-    fps: int,
-    cameras,
-) -> dict:
-    length = len(sampled_obs)
-    actions = np.vstack(sampled_actions).astype(np.float32)
-    observations = np.vstack(sampled_obs).astype(np.float32)
-    timestamps = np.arange(length, dtype=np.float64) / float(fps)
-    stats = {
-        "episode_index": episode_index,
-        "dataset_from_index": gidx,
-        "dataset_to_index": gidx + length,
-        "stats": {},
-    }
-    stats["stats"]["action"] = _describe_vector(actions)
-    stats["stats"]["observation.state"] = _describe_vector(observations)
-    stats["stats"]["timestamp"] = _describe_scalar(timestamps)
-    stats["stats"]["frame_index"] = _describe_scalar(np.arange(length, dtype=np.int64))
-    stats["stats"]["episode_index"] = _describe_scalar(
-        np.full(length, episode_index, dtype=np.int64)
-    )
-    stats["stats"]["index"] = _describe_scalar(
-        np.arange(gidx, gidx + length, dtype=np.int64)
-    )
-    stats["stats"]["task_index"] = _describe_scalar(
-        np.full(length, task_index, dtype=np.int64)
-    )
-    for cam_key, cam_paths in cameras.items():
-        stats["stats"][_get_image_name_from_key(cam_key)] = _describe_images(cam_paths)
-    return stats
+class _LeRobotV21Converter:
+    """Converts an OpenArm Dataset into LeRobot v2.1 layout on disk.
 
+    State that every writer step needs (dataset, output_dir, fps, joint metadata,
+    downsampled records, index remaps) lives on the instance so individual write
+    methods do not have to thread the same arguments through repeatedly.
+    """
 
-def _write_parquet(
-    dataset, records, output_dir, fps, remap_episode_index, remap_task_index
-):
-    gidx = 0
-    for episode_index, num_frames, sampled_obs, sampled_actions, _ in records:
-        lerobot_episode_index = remap_episode_index[episode_index]
-        task_index = remap_task_index[
-            int(dataset.meta.episodes[episode_index]["task_index"])
-        ]
-        success = bool(dataset.meta.episodes[episode_index]["success"])
-        t_cam = np.arange(num_frames, dtype=np.float64) / float(fps)
-        df = pd.DataFrame(
-            {
-                "action": sampled_actions,
-                "observation.state": sampled_obs,
-                "timestamp": t_cam.astype(np.float64),
-                "frame_index": np.arange(num_frames, dtype=np.int64),
-                "episode_index": np.full(
-                    num_frames, lerobot_episode_index, dtype=np.int64
-                ),
-                "index": np.arange(gidx, gidx + num_frames, dtype=np.int64),
-                "task_index": np.full(num_frames, task_index, dtype=np.int64),
-                "success": np.full(num_frames, success, dtype=np.int64),
-                "last_frame_index": np.full(num_frames, num_frames - 1, dtype=np.int64),
+    def __init__(
+        self,
+        dataset: Dataset,
+        output_dir: Path,
+        fps: int,
+        train_split: float,
+        success_only: bool,
+    ):
+        self.dataset = dataset
+        self.output_dir = output_dir
+        self.fps = fps
+        self.train_split = train_split
+        self.success_only = success_only
+        self.joint_keys, self.joint_names = self._collect_keys_and_joint_names()
+        self.records = self._collect_downsampled_data()
+        if not self.records:
+            raise ValueError("No episodes to write.")
+        self.remap_episode_index, self.remap_task_index = self._build_remaps()
+
+    def run(self) -> None:
+        self._write_parquet()
+        self._write_videos()
+        self._write_metadata()
+
+    def _collect_keys_and_joint_names(self):
+        keys = []
+        joint_names = []
+        for name, embodiment in self.dataset.meta.equipment.embodiments.items():
+            if embodiment.components:
+                for component in embodiment.components:
+                    for attribute in embodiment.attributes:
+                        key = f"{name}/{component}/{attribute}"
+                        keys.append(key)
+                        joint_names.extend(
+                            _get_joint_names(component, embodiment.joints)
+                        )
+            else:
+                for attribute in embodiment.attributes:
+                    key = f"{name}/{attribute}"
+                    keys.append(key)
+                    joint_names.extend(_get_joint_names(None, embodiment.joints))
+        return keys, joint_names
+
+    def _collect_downsampled_data(self):
+        records = []
+        for episode_index in range(self.dataset.meta.num_episodes):
+            success = self.dataset.meta.episodes[episode_index]["success"]
+            if not success and self.success_only:
+                continue
+            samples = self.dataset.sample(hz=self.fps, episode_index=episode_index)
+            num_frames = len(samples)
+            sampled_obs = [
+                np.concatenate([s.obs[k] for k in self.joint_keys], axis=0).astype(
+                    np.float32
+                )
+                for s in samples
+            ]
+            sampled_actions = [
+                np.concatenate([s.action[k] for k in self.joint_keys], axis=0).astype(
+                    np.float32
+                )
+                for s in samples
+            ]
+            sampled_cameras = {
+                k: [Path(s.cameras[k].path) for s in samples]
+                for k in self.dataset.camera_names
             }
-        )
-        parquet_path = (
-            output_dir
-            / "data"
-            / _get_chunk_name(lerobot_episode_index)
-            / f"episode_{lerobot_episode_index:06d}.parquet"
-        )
-        parquet_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(parquet_path, index=False)
-        gidx += num_frames
-
-
-def _write_videos(dataset, records, output_dir, fps, remap_episode_index):
-    for episode_index, _, _, _, sampled_cameras in records:
-        lerobot_episode_index = remap_episode_index[episode_index]
-        for camera_key in dataset.camera_names:
-            video_path = (
-                output_dir
-                / "videos"
-                / _get_chunk_name(lerobot_episode_index)
-                / _get_image_name_from_key(camera_key)
-                / f"episode_{lerobot_episode_index:06d}.mp4"
+            records.append(
+                (
+                    episode_index,
+                    num_frames,
+                    sampled_obs,
+                    sampled_actions,
+                    sampled_cameras,
+                )
             )
-            video_path.parent.mkdir(parents=True, exist_ok=True)
-            _encode_mp4(sampled_cameras[camera_key], fps, video_path)
+        return records
 
+    def _build_remaps(self):
+        """Build remapping dicts from original episode/task indices to contiguous indices.
 
-def _write_metadata(
-    dataset,
-    records,
-    output_dir,
-    fps,
-    train_split,
-    joint_names,
-    remap_episode_index,
-    remap_task_index,
-):
-    METADATA_DIR = "meta"
-    episodes_metadata = []
-    episodes_stats = []
+        When records is a filtered subset of episodes (e.g., success_only=True),
+        original indices may be sparse. LeRobot v2.1 expects episode/task indices
+        to be contiguous starting from 0. When records contains all episodes the
+        returned maps are the identity.
+        """
+        remap_episode_index = {
+            original: new for new, (original, *_) in enumerate(self.records)
+        }
+        seen = set()
+        used_task_indices = []
+        for original_episode_index, *_ in self.records:
+            original_task_index = self.dataset.meta.episodes[original_episode_index][
+                "task_index"
+            ]
+            if original_task_index not in seen:
+                seen.add(original_task_index)
+                used_task_indices.append(original_task_index)
+        used_task_indices.sort()
+        remap_task_index = {
+            original: new for new, original in enumerate(used_task_indices)
+        }
+        return remap_episode_index, remap_task_index
 
-    all_actions = []
-    all_observations = []
-    timestamp_all = []
-    frame_index_all = []
-    episode_index_all = []
-    task_index_all = []
-    index_all = []
-    success_all = []
-    last_frame_index_all = []
-
-    gidx = 0
-    for (
-        episode_index,
-        num_frames,
+    def _calc_episode_stats(
+        self,
         sampled_obs,
         sampled_actions,
-        sampled_cameras,
-    ) in records:
-        lerobot_episode_index = remap_episode_index[episode_index]
-        lerobot_task_index = remap_task_index[
-            int(dataset.meta.episodes[episode_index]["task_index"])
-        ]
-        # save for overall stats
-        all_actions.append(sampled_actions)
-        all_observations.append(sampled_obs)
-        timestamp_all.append(np.arange(num_frames, dtype=np.float64) / float(fps))
-        frame_index_all.append(np.arange(num_frames, dtype=np.int64))
-        episode_index_all.append(
-            np.full(num_frames, lerobot_episode_index, dtype=np.int64)
-        )
-        task_index_all.append(np.full(num_frames, lerobot_task_index, dtype=np.int64))
-        index_all.append(np.arange(gidx, gidx + num_frames, dtype=np.int64))
-        success_all.append(
-            np.full(
-                num_frames,
-                bool(dataset.meta.episodes[episode_index]["success"]),
-                dtype=np.int64,
-            )
-        )
-        last_frame_index_all.append(np.full(num_frames, num_frames - 1, dtype=np.int64))
-
-        # episodes metadata and stats
-        task_name = dataset.meta.data["tasks"][
-            int(dataset.meta.episodes[episode_index]["task_index"])
-        ]["prompt"]
-        rec = {
-            "episode_index": lerobot_episode_index,
-            "tasks": [task_name],
-            "length": len(sampled_obs),
+        episode_index: int,
+        gidx: int,
+        task_index,
+        cameras,
+    ) -> dict:
+        length = len(sampled_obs)
+        actions = np.vstack(sampled_actions).astype(np.float32)
+        observations = np.vstack(sampled_obs).astype(np.float32)
+        timestamps = np.arange(length, dtype=np.float64) / float(self.fps)
+        stats = {
+            "episode_index": episode_index,
+            "dataset_from_index": gidx,
+            "dataset_to_index": gidx + length,
+            "stats": {},
         }
-        episodes_metadata.append(rec)
+        stats["stats"]["action"] = _describe_vector(actions)
+        stats["stats"]["observation.state"] = _describe_vector(observations)
+        stats["stats"]["timestamp"] = _describe_scalar(timestamps)
+        stats["stats"]["frame_index"] = _describe_scalar(
+            np.arange(length, dtype=np.int64)
+        )
+        stats["stats"]["episode_index"] = _describe_scalar(
+            np.full(length, episode_index, dtype=np.int64)
+        )
+        stats["stats"]["index"] = _describe_scalar(
+            np.arange(gidx, gidx + length, dtype=np.int64)
+        )
+        stats["stats"]["task_index"] = _describe_scalar(
+            np.full(length, task_index, dtype=np.int64)
+        )
+        for cam_key, cam_paths in cameras.items():
+            stats["stats"][_get_image_name_from_key(cam_key)] = _describe_images(
+                cam_paths
+            )
+        return stats
 
-        stats = _calc_episode_stats(
+    def _write_parquet(self):
+        gidx = 0
+        for episode_index, num_frames, sampled_obs, sampled_actions, _ in self.records:
+            lerobot_episode_index = self.remap_episode_index[episode_index]
+            task_index = self.remap_task_index[
+                self.dataset.meta.episodes[episode_index]["task_index"]
+            ]
+            success = self.dataset.meta.episodes[episode_index]["success"]
+            t_cam = np.arange(num_frames, dtype=np.float64) / float(self.fps)
+            df = pd.DataFrame(
+                {
+                    "action": sampled_actions,
+                    "observation.state": sampled_obs,
+                    "timestamp": t_cam.astype(np.float64),
+                    "frame_index": np.arange(num_frames, dtype=np.int64),
+                    "episode_index": np.full(
+                        num_frames, lerobot_episode_index, dtype=np.int64
+                    ),
+                    "index": np.arange(gidx, gidx + num_frames, dtype=np.int64),
+                    "task_index": np.full(num_frames, task_index, dtype=np.int64),
+                    "success": np.full(num_frames, success, dtype=np.int64),
+                    "last_frame_index": np.full(
+                        num_frames, num_frames - 1, dtype=np.int64
+                    ),
+                }
+            )
+            parquet_path = (
+                self.output_dir
+                / "data"
+                / _get_chunk_name(lerobot_episode_index)
+                / f"episode_{lerobot_episode_index:06d}.parquet"
+            )
+            parquet_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(parquet_path, index=False)
+            gidx += num_frames
+
+    def _write_videos(self):
+        for episode_index, _, _, _, sampled_cameras in self.records:
+            lerobot_episode_index = self.remap_episode_index[episode_index]
+            for camera_key in self.dataset.camera_names:
+                video_path = (
+                    self.output_dir
+                    / "videos"
+                    / _get_chunk_name(lerobot_episode_index)
+                    / _get_image_name_from_key(camera_key)
+                    / f"episode_{lerobot_episode_index:06d}.mp4"
+                )
+                video_path.parent.mkdir(parents=True, exist_ok=True)
+                _encode_mp4(sampled_cameras[camera_key], self.fps, video_path)
+
+    def _write_metadata(self):
+        episodes_metadata = []
+        episodes_stats = []
+
+        all_actions = []
+        all_observations = []
+        timestamp_all = []
+        frame_index_all = []
+        episode_index_all = []
+        task_index_all = []
+        index_all = []
+        success_all = []
+        last_frame_index_all = []
+
+        gidx = 0
+        for (
+            episode_index,
+            num_frames,
             sampled_obs,
             sampled_actions,
-            lerobot_episode_index,
-            gidx,
-            lerobot_task_index,
-            fps,
             sampled_cameras,
-        )
-        episodes_stats.append(stats)
-        gidx += len(sampled_obs)
-    # save episodes.jsonl
-    episodes_metadata_path = output_dir / METADATA_DIR / "episodes.jsonl"
-    episodes_metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    with episodes_metadata_path.open("w", encoding="utf-8") as f:
-        for rec in episodes_metadata:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        ) in self.records:
+            lerobot_episode_index = self.remap_episode_index[episode_index]
+            lerobot_task_index = self.remap_task_index[
+                int(self.dataset.meta.episodes[episode_index]["task_index"])
+            ]
+            # save for overall stats
+            all_actions.append(sampled_actions)
+            all_observations.append(sampled_obs)
+            timestamp_all.append(
+                np.arange(num_frames, dtype=np.float64) / float(self.fps)
+            )
+            frame_index_all.append(np.arange(num_frames, dtype=np.int64))
+            episode_index_all.append(
+                np.full(num_frames, lerobot_episode_index, dtype=np.int64)
+            )
+            task_index_all.append(
+                np.full(num_frames, lerobot_task_index, dtype=np.int64)
+            )
+            index_all.append(np.arange(gidx, gidx + num_frames, dtype=np.int64))
+            success_all.append(
+                np.full(
+                    num_frames,
+                    bool(self.dataset.meta.episodes[episode_index]["success"]),
+                    dtype=np.int64,
+                )
+            )
+            last_frame_index_all.append(
+                np.full(num_frames, num_frames - 1, dtype=np.int64)
+            )
 
-    # save episodes_stats.jsonl
-    episodes_stats_path = output_dir / METADATA_DIR / "episodes_stats.jsonl"
-    episodes_stats_path.parent.mkdir(parents=True, exist_ok=True)
-    with episodes_stats_path.open("w", encoding="utf-8") as f:
-        for stats in episodes_stats:
-            f.write(json.dumps(stats, ensure_ascii=False) + "\n")
-
-    # save tasks.jsonl using remapped (contiguous) task indices
-    tasks_path = output_dir / METADATA_DIR / "tasks.jsonl"
-    tasks_path.parent.mkdir(parents=True, exist_ok=True)
-    tasks_sorted = sorted(remap_task_index.items(), key=lambda kv: kv[1])
-    with tasks_path.open("w", encoding="utf-8") as f:
-        for original_task_index, new_task_index in tasks_sorted:
-            task_name = dataset.meta.data["tasks"][original_task_index]["prompt"]
+            # episodes metadata and stats
+            task_name = self.dataset.meta.data["tasks"][
+                self.dataset.meta.episodes[episode_index]["task_index"]
+            ]["prompt"]
             rec = {
-                "task_index": new_task_index,
-                "task": task_name,
+                "episode_index": lerobot_episode_index,
+                "tasks": [task_name],
+                "length": len(sampled_obs),
             }
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            episodes_metadata.append(rec)
 
-    # stats.json
-    all_actions = (
-        np.vstack(all_actions)
-        if all_actions
-        else np.empty((0, len(joint_names)), dtype=np.float32)
-    )
-    all_observations = (
-        np.vstack(all_observations)
-        if all_observations
-        else np.empty((0, len(joint_names)), dtype=np.float32)
-    )
-    timestamp_all = (
-        np.concatenate(timestamp_all)
-        if timestamp_all
-        else np.empty((0,), dtype=np.float64)
-    )
-    frame_index_all = (
-        np.concatenate(frame_index_all)
-        if frame_index_all
-        else np.empty((0,), dtype=np.int64)
-    )
-    episode_index_all = (
-        np.concatenate(episode_index_all)
-        if episode_index_all
-        else np.empty((0,), dtype=np.int64)
-    )
-    task_index_all = (
-        np.concatenate(task_index_all)
-        if task_index_all
-        else np.empty((0,), dtype=np.int64)
-    )
-    index_all = (
-        np.concatenate(index_all) if index_all else np.empty((0,), dtype=np.int64)
-    )
-    success_all = (
-        np.concatenate(success_all) if success_all else np.empty((0,), dtype=np.int64)
-    )
-    last_frame_index_all = (
-        np.concatenate(last_frame_index_all)
-        if last_frame_index_all
-        else np.empty((0,), dtype=np.int64)
-    )
+            stats = self._calc_episode_stats(
+                sampled_obs,
+                sampled_actions,
+                lerobot_episode_index,
+                gidx,
+                lerobot_task_index,
+                sampled_cameras,
+            )
+            episodes_stats.append(stats)
+            gidx += len(sampled_obs)
+        # save episodes.jsonl
+        episodes_metadata_path = self.output_dir / METADATA_DIR / "episodes.jsonl"
+        episodes_metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        with episodes_metadata_path.open("w", encoding="utf-8") as f:
+            for rec in episodes_metadata:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    overall_stats = {
-        "action": _describe_vector(all_actions),
-        "observation.state": _describe_vector(all_observations),
-        "timestamp": _describe_scalar(timestamp_all),
-        "frame_index": _describe_scalar(frame_index_all),
-        "episode_index": _describe_scalar(episode_index_all),
-        "task_index": _describe_scalar(task_index_all),
-        "index": _describe_scalar(index_all),
-        "success": _describe_scalar(success_all),
-        "last_frame_index": _describe_scalar(last_frame_index_all),
-    }
-    stats_path = output_dir / METADATA_DIR / "stats.json"
-    stats_path.parent.mkdir(parents=True, exist_ok=True)
-    with stats_path.open("w", encoding="utf-8") as f:
-        json.dump(overall_stats, f, ensure_ascii=False, indent=4)
+        # save episodes_stats.jsonl
+        episodes_stats_path = self.output_dir / METADATA_DIR / "episodes_stats.jsonl"
+        episodes_stats_path.parent.mkdir(parents=True, exist_ok=True)
+        with episodes_stats_path.open("w", encoding="utf-8") as f:
+            for stats in episodes_stats:
+                f.write(json.dumps(stats, ensure_ascii=False) + "\n")
 
-    # info.json
-    features = {
-        "action": {
-            "dtype": "float32",
-            "names": joint_names,
-            "shape": [len(joint_names)],
-        },
-        "observation.state": {
-            "dtype": "float32",
-            "names": joint_names,
-            "shape": [len(joint_names)],
-        },
-        "timestamp": {"dtype": "float64", "shape": [1], "names": None},
-        "frame_index": {"dtype": "int64", "shape": [1], "names": None},
-        "episode_index": {"dtype": "int64", "shape": [1], "names": None},
-        "index": {"dtype": "int64", "shape": [1], "names": None},
-        "task_index": {"dtype": "int64", "shape": [1], "names": None},
-        "success": {"dtype": "int64", "shape": [1], "names": None},
-        "last_frame_index": {"dtype": "int64", "shape": [1], "names": None},
-    }
-    sample_record = dataset.sample(hz=fps, episode_index=0)[0]
-    for cam in dataset.camera_names:
-        sample_image = sample_record.cameras[cam].load()
-        h, w = sample_image.shape[:2]
-        features[f"{_get_image_name_from_key(cam)}"] = {
-            "dtype": "video",
-            "shape": [h, w, 3],
-            "names": ["height", "width", "channels"],
-            "info": {
-                "video.height": h,
-                "video.width": w,
-                "video.codec": VIDEO_CODEC,
-                "video.pix_fmt": VIDEO_PIX_FMT,
-                "video.is_depth_map": False,
-                "video.fps": fps,
-                "video.channels": 3,
-                "has_audio": False,
-            },
+        # save tasks.jsonl using remapped (contiguous) task indices
+        tasks_path = self.output_dir / METADATA_DIR / "tasks.jsonl"
+        tasks_path.parent.mkdir(parents=True, exist_ok=True)
+        tasks_sorted = sorted(self.remap_task_index.items(), key=lambda kv: kv[1])
+        with tasks_path.open("w", encoding="utf-8") as f:
+            for original_task_index, new_task_index in tasks_sorted:
+                task_name = self.dataset.meta.data["tasks"][original_task_index][
+                    "prompt"
+                ]
+                rec = {
+                    "task_index": new_task_index,
+                    "task": task_name,
+                }
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+        # stats.json
+        all_actions = (
+            np.vstack(all_actions)
+            if all_actions
+            else np.empty((0, len(self.joint_names)), dtype=np.float32)
+        )
+        all_observations = (
+            np.vstack(all_observations)
+            if all_observations
+            else np.empty((0, len(self.joint_names)), dtype=np.float32)
+        )
+        timestamp_all = (
+            np.concatenate(timestamp_all)
+            if timestamp_all
+            else np.empty((0,), dtype=np.float64)
+        )
+        frame_index_all = (
+            np.concatenate(frame_index_all)
+            if frame_index_all
+            else np.empty((0,), dtype=np.int64)
+        )
+        episode_index_all = (
+            np.concatenate(episode_index_all)
+            if episode_index_all
+            else np.empty((0,), dtype=np.int64)
+        )
+        task_index_all = (
+            np.concatenate(task_index_all)
+            if task_index_all
+            else np.empty((0,), dtype=np.int64)
+        )
+        index_all = (
+            np.concatenate(index_all) if index_all else np.empty((0,), dtype=np.int64)
+        )
+        success_all = (
+            np.concatenate(success_all)
+            if success_all
+            else np.empty((0,), dtype=np.int64)
+        )
+        last_frame_index_all = (
+            np.concatenate(last_frame_index_all)
+            if last_frame_index_all
+            else np.empty((0,), dtype=np.int64)
+        )
+
+        overall_stats = {
+            "action": _describe_vector(all_actions),
+            "observation.state": _describe_vector(all_observations),
+            "timestamp": _describe_scalar(timestamp_all),
+            "frame_index": _describe_scalar(frame_index_all),
+            "episode_index": _describe_scalar(episode_index_all),
+            "task_index": _describe_scalar(task_index_all),
+            "index": _describe_scalar(index_all),
+            "success": _describe_scalar(success_all),
+            "last_frame_index": _describe_scalar(last_frame_index_all),
         }
-    num_episodes = len(records)
-    total_chunks = max((num_episodes - 1) // CHUNK_SIZE + 1, 0) if num_episodes else 0
-    train_end = round(num_episodes * train_split)
-    splits = {"train": f"0:{train_end}"}
-    if train_end < num_episodes:
-        splits["val"] = f"{train_end}:{num_episodes}"
-    info = {
-        "codebase_version": "v2.1",
-        "robot_type": ROBOT_TYPE,
-        "total_episodes": num_episodes,
-        "total_frames": len(index_all),
-        "total_tasks": len(set(task_index_all)),
-        "total_videos": num_episodes * len(dataset.camera_names),
-        "total_chunks": total_chunks,
-        "chunks_size": CHUNK_SIZE,
-        "fps": fps,
-        "splits": splits,
-        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-        "features": features,
-    }
-    info_path = output_dir / METADATA_DIR / "info.json"
-    with info_path.open("w", encoding="utf-8") as f:
-        json.dump(info, f, ensure_ascii=False, indent=4)
+        stats_path = self.output_dir / METADATA_DIR / "stats.json"
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        with stats_path.open("w", encoding="utf-8") as f:
+            json.dump(overall_stats, f, ensure_ascii=False, indent=4)
+
+        # info.json
+        features = {
+            "action": {
+                "dtype": "float32",
+                "names": self.joint_names,
+                "shape": [len(self.joint_names)],
+            },
+            "observation.state": {
+                "dtype": "float32",
+                "names": self.joint_names,
+                "shape": [len(self.joint_names)],
+            },
+            "timestamp": {"dtype": "float64", "shape": [1], "names": None},
+            "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+            "episode_index": {"dtype": "int64", "shape": [1], "names": None},
+            "index": {"dtype": "int64", "shape": [1], "names": None},
+            "task_index": {"dtype": "int64", "shape": [1], "names": None},
+            "success": {"dtype": "int64", "shape": [1], "names": None},
+            "last_frame_index": {"dtype": "int64", "shape": [1], "names": None},
+        }
+        sample_record = self.dataset.sample(hz=self.fps, episode_index=0)[0]
+        for cam in self.dataset.camera_names:
+            sample_image = sample_record.cameras[cam].load()
+            h, w = sample_image.shape[:2]
+            features[f"{_get_image_name_from_key(cam)}"] = {
+                "dtype": "video",
+                "shape": [h, w, 3],
+                "names": ["height", "width", "channels"],
+                "info": {
+                    "video.height": h,
+                    "video.width": w,
+                    "video.codec": VIDEO_CODEC,
+                    "video.pix_fmt": VIDEO_PIX_FMT,
+                    "video.is_depth_map": False,
+                    "video.fps": self.fps,
+                    "video.channels": 3,
+                    "has_audio": False,
+                },
+            }
+        num_episodes = len(self.records)
+        total_chunks = (
+            max((num_episodes - 1) // CHUNK_SIZE + 1, 0) if num_episodes else 0
+        )
+        train_end = round(num_episodes * self.train_split)
+        splits = {"train": f"0:{train_end}"}
+        if train_end < num_episodes:
+            splits["val"] = f"{train_end}:{num_episodes}"
+        info = {
+            "codebase_version": "v2.1",
+            "robot_type": ROBOT_TYPE,
+            "total_episodes": num_episodes,
+            "total_frames": len(index_all),
+            "total_tasks": len(set(task_index_all)),
+            "total_videos": num_episodes * len(self.dataset.camera_names),
+            "total_chunks": total_chunks,
+            "chunks_size": CHUNK_SIZE,
+            "fps": self.fps,
+            "splits": splits,
+            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+            "features": features,
+        }
+        info_path = self.output_dir / METADATA_DIR / "info.json"
+        with info_path.open("w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=4)
 
 
 def to_lerobotv21(
@@ -662,37 +705,11 @@ def to_lerobotv21(
     if fps <= 0:
         raise ValueError(f"fps must be a positive integer, got {fps}")
 
-    # set smoothing cutoff
     dataset.set_smoothing(cutoff=smoothing_cutoff)
-    # Create the output directories
-    output_dir = Path(output_dir)
-
-    # Collect joint keys and names
-    joint_keys, joint_names = _collect_keys_and_joint_names(dataset)
-
-    # collect downsampled data for each episode
-    records = _collect_downsampled_data(dataset, fps, joint_keys, success_only)
-
-    if not records:
-        raise ValueError("No episodes to write.")
-
-    # build remaps from original to contiguous output indices (identity unless filtered)
-    remap_episode_index, remap_task_index = _build_remaps(dataset, records)
-
-    # save parquet files for each episode (output_dir/data)
-    _write_parquet(
-        dataset, records, output_dir, fps, remap_episode_index, remap_task_index
-    )
-    # save_videos for each episode (output_dir/videos)
-    _write_videos(dataset, records, output_dir, fps, remap_episode_index)
-    # episodes metadata and stats
-    _write_metadata(
-        dataset,
-        records,
-        output_dir,
-        fps,
-        train_split,
-        joint_names,
-        remap_episode_index,
-        remap_task_index,
-    )
+    _LeRobotV21Converter(
+        dataset=dataset,
+        output_dir=Path(output_dir),
+        fps=fps,
+        train_split=train_split,
+        success_only=success_only,
+    ).run()
