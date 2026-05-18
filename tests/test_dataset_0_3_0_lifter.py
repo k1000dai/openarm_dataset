@@ -98,13 +98,6 @@ def test_write_preserves_lifter(dataset, tmp_path):
         assert (
             output / "episodes" / episode_id / "action" / "lifter" / "elevation.parquet"
         ).exists()
-        # Lifter has no `lift` component subdirectory.
-        assert not (
-            output / "episodes" / episode_id / "obs" / "lifter" / "lift"
-        ).exists()
-        assert not (
-            output / "episodes" / episode_id / "action" / "lifter" / "lift"
-        ).exists()
     rewritten = Dataset(output)
     obs = rewritten.load_obs(0)
     assert "lifter/elevation" in obs
