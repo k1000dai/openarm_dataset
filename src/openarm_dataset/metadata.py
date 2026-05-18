@@ -181,6 +181,8 @@ class Embodiments(Mapping):
             return OpenArm(name, data)
         elif id_ == "Ball Screw Lifter":
             return BallScrewLifter(name, data)
+        elif id_ == "OpenArmCellLifter":
+            return OpenArmCellLifter(name, data)
         else:
             raise ValueError(f"Invalid embodiment id: {id_}")
 
@@ -247,6 +249,16 @@ class BallScrewLifter(Embodiment):
         super().__init__(name, data)
         self.attributes = ("qpos",)
         self.joints = ("position",)
+
+
+class OpenArmCellLifter(Embodiment):
+    """Metadata for OpenArm cell lifter as embodiment."""
+
+    def __init__(self, name: str, data: dict):
+        """Initialize OpenArmCellLifter."""
+        super().__init__(name, data)
+        self.attributes = ("elevation",)
+        self.joints = ("elevation",)
 
 
 class Camera:
