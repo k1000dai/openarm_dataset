@@ -179,8 +179,6 @@ class Embodiments(Mapping):
         id_ = data["id"]
         if id_ == "OpenArm":
             return OpenArm(name, data)
-        elif id_ == "Ball Screw Lifter":
-            return BallScrewLifter(name, data)
         elif id_ == "OpenArmCellLifter":
             return OpenArmCellLifter(name, data)
         else:
@@ -239,16 +237,6 @@ class OpenArm(Embodiment):
             "joint7",
             "gripper",
         )
-
-
-class BallScrewLifter(Embodiment):
-    """Metadata for ball screw lifter as embodiment."""
-
-    def __init__(self, name: str, data: dict):
-        """Initialize BallScrewLifter."""
-        super().__init__(name, data)
-        self.attributes = ("qpos",)
-        self.joints = ("position",)
 
 
 class OpenArmCellLifter(Embodiment):
