@@ -24,7 +24,6 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 FIXTURE_DIR = Path(__file__).parent / "fixture"
 DATASET_0_3_0_PATH = FIXTURE_DIR / "dataset_0.3.0"
-DATASET_0_3_0_LIFTER_PATH = FIXTURE_DIR / "dataset_0.3.0_lifter"
 FPS = 30
 # Image stats are subsampled (lerobot-style), so tolerances are loose vs full-pixel truth.
 MEAN_ATOL = 5e-3
@@ -168,13 +167,12 @@ def test_data(lerobot_v21_setup):
     df = pd.read_parquet(data_path)
 
     sample_episode = dataset.sample(30, episode_index=0)
-    sample_episode_0_action = sample_episode[
-        0
-    ].action  # {"arms/right/qpos": array([0.1, 0.2, 0.3]), "arms/left/qpos": array([0.4, 0.5, 0.6])}
+    sample_episode_0_action = sample_episode[0].action
     sample_0_action = np.concatenate(
         [
             sample_episode_0_action["arms/right/qpos"],
             sample_episode_0_action["arms/left/qpos"],
+            sample_episode_0_action["lifter/elevation"],
         ]
     )
     lerobot_action = df["action"].iloc[0]
@@ -186,7 +184,11 @@ def test_data(lerobot_v21_setup):
 
     sample_observation = sample_episode[0].obs
     sample_0_observation = np.concatenate(
-        [sample_observation["arms/right/qpos"], sample_observation["arms/left/qpos"]]
+        [
+            sample_observation["arms/right/qpos"],
+            sample_observation["arms/left/qpos"],
+            sample_observation["lifter/elevation"],
+        ]
     )
     lerobot_observation = df["observation.state"].iloc[0]
 
@@ -227,22 +229,8 @@ def test_load(lerobot_v21_setup):
     )
 
 
-@pytest.fixture
-def lerobot_v21_lifter_setup(tmp_path):
-    dataset = Dataset(DATASET_0_3_0_LIFTER_PATH)
-    dataset.set_smoothing(1.0)
-    dataset.write(
-        tmp_path,
-        format="lerobot_v2.1",
-        fps=FPS,
-        train_split=0.8,
-        success_only=False,
-    )
-    return dataset, tmp_path
-
-
-def test_lifter_info_features(lerobot_v21_lifter_setup):
-    _, lerobot_path = lerobot_v21_lifter_setup
+def test_lifter_info_features(lerobot_v21_setup):
+    _, lerobot_path = lerobot_v21_setup
     with open(lerobot_path / "meta" / "info.json") as f:
         info = json.load(f)
     # 8 (right arm) + 8 (left arm) + 1 (lifter position) = 17
@@ -250,33 +238,6 @@ def test_lifter_info_features(lerobot_v21_lifter_setup):
     assert info["features"]["observation.state"]["shape"] == [17]
     assert info["features"]["action"]["names"][-1] == "elevation.pos"
     assert info["features"]["observation.state"]["names"][-1] == "elevation.pos"
-
-
-def test_lifter_data_matches_source(lerobot_v21_lifter_setup):
-    dataset, lerobot_path = lerobot_v21_lifter_setup
-    data_path = lerobot_path / "data" / "chunk-000" / "episode_000000.parquet"
-    df = pd.read_parquet(data_path)
-
-    sample_episode = dataset.sample(FPS, episode_index=0)
-    expected_obs = np.concatenate(
-        [
-            sample_episode[0].obs["arms/right/qpos"],
-            sample_episode[0].obs["arms/left/qpos"],
-            sample_episode[0].obs["lifter/elevation"],
-        ]
-    )
-    expected_action = np.concatenate(
-        [
-            sample_episode[0].action["arms/right/qpos"],
-            sample_episode[0].action["arms/left/qpos"],
-            sample_episode[0].action["lifter/elevation"],
-        ]
-    )
-
-    assert len(df["observation.state"].iloc[0]) == 17
-    assert len(df["action"].iloc[0]) == 17
-    np.testing.assert_allclose(df["observation.state"].iloc[0], expected_obs, atol=1e-6)
-    np.testing.assert_allclose(df["action"].iloc[0], expected_action, atol=1e-6)
 
 
 def test_success_only(tmp_path):
@@ -310,6 +271,7 @@ def test_success_only(tmp_path):
         [
             sample_episode_0_action["arms/right/qpos"],
             sample_episode_0_action["arms/left/qpos"],
+            sample_episode_0_action["lifter/elevation"],
         ]
     )
     lerobot_action = df["action"].iloc[0]

@@ -19,7 +19,7 @@ from openarm_dataset.dataset import Dataset
 
 DATASET_DIR = Path(__file__).parent / "fixture" / "dataset_0.3.0"
 
-JOINT_COLUMNS = [
+ARM_JOINT_COLUMNS = [
     "joint1",
     "joint2",
     "joint3",
@@ -29,6 +29,22 @@ JOINT_COLUMNS = [
     "joint7",
     "gripper",
 ]
+
+LIFTER_JOINT_COLUMNS = ["elevation"]
+
+ARM_OBS_KEYS = {
+    "arms/left/qpos",
+    "arms/left/qvel",
+    "arms/left/qtorque",
+    "arms/right/qpos",
+    "arms/right/qvel",
+    "arms/right/qtorque",
+}
+
+ARM_ACTION_KEYS = {
+    "arms/left/qpos",
+    "arms/right/qpos",
+}
 
 
 @pytest.fixture
@@ -42,23 +58,19 @@ def test_num_episodes(dataset):
 
 def test_load_obs(dataset):
     obs = dataset.load_obs(0)
-    assert set(obs) == {
-        "arms/left/qpos",
-        "arms/left/qvel",
-        "arms/left/qtorque",
-        "arms/right/qpos",
-        "arms/right/qvel",
-        "arms/right/qtorque",
-    }
-    for key in obs:
+    assert set(obs) == ARM_OBS_KEYS | {"lifter/elevation"}
+    for key in ARM_OBS_KEYS:
         assert obs[key].index.name == "timestamp"
-        assert list(obs[key].columns) == JOINT_COLUMNS
+        assert list(obs[key].columns) == ARM_JOINT_COLUMNS
     assert obs["arms/left/qpos"].shape == (745, 8)
     assert obs["arms/left/qvel"].shape == (745, 8)
     assert obs["arms/left/qtorque"].shape == (745, 8)
     assert obs["arms/right/qpos"].shape == (746, 8)
     assert obs["arms/right/qvel"].shape == (746, 8)
     assert obs["arms/right/qtorque"].shape == (746, 8)
+    assert obs["lifter/elevation"].index.name == "timestamp"
+    assert list(obs["lifter/elevation"].columns) == LIFTER_JOINT_COLUMNS
+    assert obs["lifter/elevation"].shape == (745, 1)
 
 
 def test_obs_columns_are_independent(dataset):
@@ -75,47 +87,37 @@ def test_load_all_obs(dataset):
     obs_list = [dataset.load_obs(i) for i in range(dataset.num_episodes)]
     assert len(obs_list) == dataset.num_episodes
     for obs in obs_list:
-        for key in (
-            "arms/left/qpos",
-            "arms/left/qvel",
-            "arms/left/qtorque",
-            "arms/right/qpos",
-            "arms/right/qvel",
-            "arms/right/qtorque",
-        ):
+        for key in ARM_OBS_KEYS | {"lifter/elevation"}:
             assert not obs[key].empty
 
 
 def test_load_action(dataset):
     action = dataset.load_action(0)
-    assert set(action) == {
-        "arms/left/qpos",
-        "arms/right/qpos",
-    }
+    assert set(action) == ARM_ACTION_KEYS | {"lifter/elevation"}
     assert action["arms/left/qpos"].shape == (90, 8)
     assert action["arms/right/qpos"].shape == (90, 8)
-    assert list(action["arms/left/qpos"].columns) == JOINT_COLUMNS
-    assert list(action["arms/right/qpos"].columns) == JOINT_COLUMNS
+    assert list(action["arms/left/qpos"].columns) == ARM_JOINT_COLUMNS
+    assert list(action["arms/right/qpos"].columns) == ARM_JOINT_COLUMNS
+    assert action["lifter/elevation"].shape == (90, 1)
+    assert list(action["lifter/elevation"].columns) == LIFTER_JOINT_COLUMNS
+
+
+def test_load_all_action_have_lifter(dataset):
+    for i in range(dataset.num_episodes):
+        action = dataset.load_action(i)
+        assert not action["lifter/elevation"].empty
 
 
 def test_sample(dataset):
     samples = dataset.sample(hz=30, episode_index=0)
     assert len(samples) > 1
-    assert set(samples[0].obs) == {
-        "arms/left/qpos",
-        "arms/left/qvel",
-        "arms/left/qtorque",
-        "arms/right/qpos",
-        "arms/right/qvel",
-        "arms/right/qtorque",
-    }
+    assert set(samples[0].obs) == ARM_OBS_KEYS | {"lifter/elevation"}
     assert samples[0].obs["arms/left/qpos"].shape == (8,)
     assert samples[0].obs["arms/left/qvel"].shape == (8,)
     assert samples[0].obs["arms/left/qtorque"].shape == (8,)
-    assert set(samples[0].action) == {
-        "arms/left/qpos",
-        "arms/right/qpos",
-    }
+    assert samples[0].obs["lifter/elevation"].shape == (1,)
+    assert set(samples[0].action) == ARM_ACTION_KEYS | {"lifter/elevation"}
+    assert samples[0].action["lifter/elevation"].shape == (1,)
 
 
 def test_write_preserves_state_parquet(dataset, tmp_path):
@@ -150,13 +152,13 @@ def test_write_preserves_state_parquet(dataset, tmp_path):
                 / side
                 / "qpos.parquet"
             ).exists()
+        assert (
+            output / "episodes" / episode_id / "obs" / "lifter" / "elevation.parquet"
+        ).exists()
+        assert (
+            output / "episodes" / episode_id / "action" / "lifter" / "elevation.parquet"
+        ).exists()
     rewritten = Dataset(output)
     obs = rewritten.load_obs(0)
-    assert set(obs) == {
-        "arms/left/qpos",
-        "arms/left/qvel",
-        "arms/left/qtorque",
-        "arms/right/qpos",
-        "arms/right/qvel",
-        "arms/right/qtorque",
-    }
+    assert set(obs) == ARM_OBS_KEYS | {"lifter/elevation"}
+    assert list(obs["lifter/elevation"].columns) == LIFTER_JOINT_COLUMNS
