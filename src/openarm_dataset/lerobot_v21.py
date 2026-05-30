@@ -15,12 +15,16 @@
 """Conversion script for OpenArm Dataset to LeRobot v2.1 format."""
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 import pandas as pd
 import numpy as np
 import subprocess
 import tempfile
 import json
 import shutil
+
+from tqdm import tqdm
 
 from .dataset import Dataset
 from PIL import Image
@@ -199,8 +203,7 @@ def _encode_mp4(frames: list[Path], fps: int, out_mp4: Path, verbose=True):
             "-y",
             "-nostdin",
             "-loglevel",
-            "warning",
-            "-stats",
+            "error",
             "-f",
             "concat",
             "-safe",
@@ -371,7 +374,9 @@ def _write_parquet(
     dataset, records, output_dir, fps, remap_episode_index, remap_task_index
 ):
     gidx = 0
-    for episode_index, num_frames, sampled_obs, sampled_actions, _ in records:
+    for episode_index, num_frames, sampled_obs, sampled_actions, _ in tqdm(
+        records, desc="data"
+    ):
         lerobot_episode_index = remap_episode_index[episode_index]
         task_index = remap_task_index[
             int(dataset.meta.episodes[episode_index]["task_index"])
@@ -404,7 +409,10 @@ def _write_parquet(
         gidx += num_frames
 
 
-def _write_videos(dataset, records, output_dir, fps, remap_episode_index):
+def _write_videos(dataset, records, output_dir, fps, remap_episode_index, num_workers):
+    # build one encode task per (episode, camera); directories are created up
+    # front so the worker threads only run ffmpeg.
+    tasks = []
     for episode_index, _, _, _, sampled_cameras in records:
         lerobot_episode_index = remap_episode_index[episode_index]
         for camera_key in dataset.camera_names:
@@ -416,7 +424,17 @@ def _write_videos(dataset, records, output_dir, fps, remap_episode_index):
                 / f"episode_{lerobot_episode_index:06d}.mp4"
             )
             video_path.parent.mkdir(parents=True, exist_ok=True)
-            _encode_mp4(sampled_cameras[camera_key], fps, video_path)
+            tasks.append((sampled_cameras[camera_key], video_path))
+
+    # encode videos in parallel; each ffmpeg invocation is short and leaves
+    # most cores idle, so running several at once fills the machine.
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(_encode_mp4, frames, fps, video_path)
+            for frames, video_path in tasks
+        ]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="videos"):
+            future.result()
 
 
 def _write_metadata(
@@ -428,10 +446,10 @@ def _write_metadata(
     joint_names,
     remap_episode_index,
     remap_task_index,
+    num_workers,
 ):
     METADATA_DIR = "meta"
     episodes_metadata = []
-    episodes_stats = []
 
     all_actions = []
     all_observations = []
@@ -443,6 +461,9 @@ def _write_metadata(
     success_all = []
     last_frame_index_all = []
 
+    # first pass (cheap): accumulate flat columns for overall stats and collect
+    # the per-episode arguments for the expensive image-stats computation.
+    stats_args = []
     gidx = 0
     for (
         episode_index,
@@ -485,17 +506,35 @@ def _write_metadata(
         }
         episodes_metadata.append(rec)
 
-        stats = _calc_episode_stats(
-            sampled_obs,
-            sampled_actions,
-            lerobot_episode_index,
-            gidx,
-            lerobot_task_index,
-            fps,
-            sampled_cameras,
+        stats_args.append(
+            (
+                sampled_obs,
+                sampled_actions,
+                lerobot_episode_index,
+                gidx,
+                lerobot_task_index,
+                sampled_cameras,
+            )
         )
-        episodes_stats.append(stats)
         gidx += len(sampled_obs)
+
+    # second pass (expensive): per-episode stats are dominated by decoding
+    # images, which releases the GIL, so compute them in parallel. map keeps
+    # the original episode order.
+    def _calc(arg):
+        obs, actions, ep_index, ep_gidx, task_index, cameras = arg
+        return _calc_episode_stats(
+            obs, actions, ep_index, ep_gidx, task_index, fps, cameras
+        )
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        episodes_stats = list(
+            tqdm(
+                executor.map(_calc, stats_args),
+                total=len(stats_args),
+                desc="meta",
+            )
+        )
     # save episodes.jsonl
     episodes_metadata_path = output_dir / METADATA_DIR / "episodes.jsonl"
     episodes_metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -654,13 +693,23 @@ def to_lerobotv21(
     train_split: float = 0.8,
     smoothing_cutoff: float = 1.0,
     success_only: bool = False,
+    num_workers: int | None = None,
 ) -> None:
-    """Convert the given dataset to LeRobot v2.1 format and save to the specified output directory."""
+    """Convert the given dataset to LeRobot v2.1 format and save to the specified output directory.
+
+    num_workers controls how many ffmpeg processes encode videos in parallel;
+    defaults to the number of CPUs.
+    """
     if not (0.0 <= train_split <= 1.0):
         raise ValueError(f"train_split must be between 0 and 1, got {train_split}")
 
     if fps <= 0:
         raise ValueError(f"fps must be a positive integer, got {fps}")
+
+    if num_workers is None:
+        num_workers = os.cpu_count() or 1
+    elif num_workers < 1:
+        raise ValueError(f"num_workers must be a positive integer, got {num_workers}")
 
     # set smoothing cutoff
     dataset.set_smoothing(cutoff=smoothing_cutoff)
@@ -679,13 +728,10 @@ def to_lerobotv21(
     # build remaps from original to contiguous output indices (identity unless filtered)
     remap_episode_index, remap_task_index = _build_remaps(dataset, records)
 
-    # save parquet files for each episode (output_dir/data)
-    _write_parquet(
-        dataset, records, output_dir, fps, remap_episode_index, remap_task_index
-    )
-    # save_videos for each episode (output_dir/videos)
-    _write_videos(dataset, records, output_dir, fps, remap_episode_index)
-    # episodes metadata and stats
+    # process stages sequentially in metadata -> data -> video order. The
+    # metadata and video stages parallelize their own per-episode work with
+    # num_workers.
+    # episodes metadata and stats (output_dir/meta)
     _write_metadata(
         dataset,
         records,
@@ -695,4 +741,11 @@ def to_lerobotv21(
         joint_names,
         remap_episode_index,
         remap_task_index,
+        num_workers,
     )
+    # save parquet files for each episode (output_dir/data)
+    _write_parquet(
+        dataset, records, output_dir, fps, remap_episode_index, remap_task_index
+    )
+    # save videos for each episode (output_dir/videos)
+    _write_videos(dataset, records, output_dir, fps, remap_episode_index, num_workers)
