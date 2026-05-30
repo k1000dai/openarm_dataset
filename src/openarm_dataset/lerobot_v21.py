@@ -88,7 +88,7 @@ def _collect_downsampled_data(
     dataset: Dataset, fps: int, joint_keys, success_only=False
 ):
     records = []
-    for episode_index in range(dataset.meta.num_episodes):
+    for episode_index in tqdm(range(dataset.meta.num_episodes), desc="episodes"):
         success = dataset.meta.episodes[episode_index]["success"]
         if not success and success_only:
             continue
