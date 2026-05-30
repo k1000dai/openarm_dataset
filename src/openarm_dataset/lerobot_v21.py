@@ -693,12 +693,12 @@ def to_lerobotv21(
     train_split: float = 0.8,
     smoothing_cutoff: float = 1.0,
     success_only: bool = False,
-    num_workers: int | None = None,
+    num_workers: int | None = 4,
 ) -> None:
     """Convert the given dataset to LeRobot v2.1 format and save to the specified output directory.
 
     num_workers controls how many ffmpeg processes encode videos in parallel;
-    defaults to the number of CPUs.
+    defaults to 4. Pass None to use the number of CPUs.
     """
     if not (0.0 <= train_split <= 1.0):
         raise ValueError(f"train_split must be between 0 and 1, got {train_split}")

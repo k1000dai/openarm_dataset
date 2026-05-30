@@ -64,9 +64,9 @@ def main():
     )
     parser.add_argument(
         "--num-workers",
-        help="Number of ffmpeg processes to run in parallel for video encoding (default: number of CPUs) if the output format is lerobot_v2.1",
+        help="Number of ffmpeg processes to run in parallel for video encoding (default: 4) if the output format is lerobot_v2.1",
         type=int,
-        default=None,
+        default=4,
     )
 
     args = parser.parse_args()
