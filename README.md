@@ -156,8 +156,7 @@ openarm-dataset-upload <input> \
     [--private]                # create the repo as private if it does not exist
 ```
 
-Validates the dataset first and exits with status `1` if any errors are reported,
-before contacting the Hub. The whole dataset directory is uploaded to a
+The whole dataset directory is uploaded to a
 [dataset repository](https://huggingface.co/docs/hub/datasets), creating it if it
 does not already exist, and tagged with the dataset version. Cameras stored as
 directories of JPEG files are repacked **in place** into one `.tar` archive per
