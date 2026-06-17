@@ -141,13 +141,13 @@ class Dataset:
             ValueError: If cameras use a mix of "dir" and "tar".
 
         """
-        first_episode = self.meta.episodes[0]
-        formats = {
-            self.load_camera(name, first_episode).format for name in self.camera_names
-        }
+        formats = set()
+        for episode in self.meta.episodes:
+            for name in self.camera_names:
+                formats.add(self.load_camera(name, episode).format)
         if len(formats) > 1:
             raise ValueError(f"Inconsistent camera formats: {sorted(formats)}")
-        return next(iter(formats), None)
+        return formats.pop()
 
     def _episode_id(self, index: int) -> str:
         return self.meta.episodes[index]["id"]

@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Upload OpenArm dataset to Hugging Face Hub."""
+"""Upload OpenArm Dataset to Hugging Face Hub."""
 
 import argparse
-import json
 import pathlib
 import shutil
 import sys
@@ -48,7 +47,7 @@ def pack_cameras_as_tar(dataset: Dataset) -> None:
 
 def create_dataset_card(
     tags: list | None = None,
-    dataset_info: dict | None = None,
+    metadata_yaml: str | None = None,
     camera_names: list[str] | None = None,
     **kwargs,
 ) -> DatasetCard:
@@ -56,8 +55,8 @@ def create_dataset_card(
 
     Args:
         tags (list | None): A list of tags to add to the dataset card.
-        dataset_info (dict | None): The dataset's info dictionary, which will
-            be displayed on the card.
+        metadata_yaml (str | None): The dataset's ``metadata.yaml`` contents,
+            embedded verbatim on the card.
         camera_names (list[str] | None): Camera names to expose as dataset
             viewer configs. Each becomes a WebDataset config so the camera
             frames are browsable on the Hugging Face Hub.
@@ -73,9 +72,9 @@ def create_dataset_card(
         card_tags += tags
     if kwargs.get("license"):
         kwargs = {**kwargs, "license": kwargs["license"]}
-    if dataset_info:
+    if metadata_yaml:
         dataset_structure = "[metadata.yaml](metadata.yaml):\n"
-        dataset_structure += f"```json\n{json.dumps(dataset_info, indent=4)}\n```\n"
+        dataset_structure += f"```yaml\n{metadata_yaml}\n```\n"
         kwargs = {**kwargs, "dataset_structure": dataset_structure}
     configs = [
         {
@@ -107,7 +106,7 @@ def upload_dataset(
     repo_id: str,
     branch: str = "main",
     tag: str | None = None,
-    dataset_info: dict | None = None,
+    metadata_yaml: str | None = None,
     licence: str | None = None,
     camera_names: list[str] | None = None,
     private: bool = False,
@@ -124,7 +123,8 @@ def upload_dataset(
         repo_id: Target repository id, e.g. ``username/dataset-name``.
         branch: Branch (revision) to upload to.
         tag: If given, create this tag on ``branch`` after the upload.
-        dataset_info: The dataset's info dictionary, shown on the dataset card.
+        metadata_yaml: The dataset's ``metadata.yaml`` contents, shown verbatim
+            on the dataset card.
         licence: Licence identifier recorded on the dataset card.
         camera_names: Camera names to expose as dataset viewer configs so the
             camera frames are browsable on the Hugging Face Hub.
@@ -157,7 +157,7 @@ def upload_dataset(
 
     card = create_dataset_card(
         tag=tag,
-        dataset_info=dataset_info,
+        metadata_yaml=metadata_yaml,
         license=licence,
         camera_names=camera_names,
     )
@@ -230,7 +230,7 @@ def main():
         args.input,
         args.repo_id,
         tag=dataset.meta.version,
-        dataset_info=dataset.meta.data,
+        metadata_yaml=(args.input / "metadata.yaml").read_text(),
         licence=args.licence,
         camera_names=dataset.camera_names,
         upload_large_folder=args.upload_large_folder,
