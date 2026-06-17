@@ -40,7 +40,7 @@ def pack_cameras_as_tar(dataset: Dataset) -> None:
     """
     for episode in dataset.meta.episodes:
         for camera in dataset.load_cameras(episode).values():
-            if camera.format != "dir":
+            if camera.format == "tar":
                 continue
             camera.write(camera.base_path, "tar")
             shutil.rmtree(camera.base_path)
