@@ -5,7 +5,7 @@
 {{card_data}}
 ---
 
-This dataset was created using [OpenArm Dataset](https://github.com/enactic/openarm_dataset).
+This dataset was uploaded using [OpenArm Dataset](https://github.com/enactic/openarm_dataset).
 
 
 ## Dataset Description

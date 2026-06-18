@@ -112,14 +112,14 @@ def upload_dataset(
     private: bool = False,
     upload_large_folder: bool = False,
 ) -> None:
-    """Upload an OpenArm dataset directory to the Hugging Face Hub.
+    """Upload an OpenArm Dataset directory to the Hugging Face Hub.
 
     Creates the dataset repository if it does not exist, then uploads the whole
     directory. Camera frames are never uploaded as loose image files; pack them
     into ``.tar`` archives first (see ``Dataset.write(camera_format="tar")``).
 
     Args:
-        input_path: Path of the OpenArm dataset directory to upload.
+        input_path: Path of the OpenArm Dataset directory to upload.
         repo_id: Target repository id, e.g. ``username/dataset-name``.
         branch: Branch (revision) to upload to.
         tag: If given, create this tag on ``branch`` after the upload.
@@ -175,13 +175,13 @@ def upload_dataset(
 
 
 def main():
-    """Upload OpenArm dataset to Hugging Face Hub."""
+    """Upload OpenArm Dataset to Hugging Face Hub."""
     parser = argparse.ArgumentParser(
-        description="Upload an OpenArm dataset to the Hugging Face Hub"
+        description="Upload an OpenArm Dataset to the Hugging Face Hub"
     )
     parser.add_argument(
         "input",
-        help="Path of an OpenArm dataset to upload",
+        help="Path of an OpenArm Dataset to upload",
         type=pathlib.Path,
     )
     parser.add_argument(
@@ -202,17 +202,11 @@ def main():
         "Defaults to Apache-2.0.",
     )
     parser.add_argument(
-        "--upload-large-folder",
+        "--large-folder",
         action="store_true",
         default=False,
         help="Use a resumable, multi-threaded upload for large datasets. "
         "Recommended for datasets larger than 1 GB.",
-    )
-    parser.add_argument(
-        "--token",
-        default=None,
-        help="Hugging Face Hub access token. Defaults to the locally cached "
-        "login when not given.",
     )
     args = parser.parse_args()
 
@@ -233,7 +227,7 @@ def main():
         metadata_yaml=(args.input / "metadata.yaml").read_text(),
         licence=args.licence,
         camera_names=dataset.camera_names,
-        upload_large_folder=args.upload_large_folder,
+        upload_large_folder=args.large_folder,
         private=args.private,
     )
 
