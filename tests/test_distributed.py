@@ -224,6 +224,7 @@ def test_slurm_submit_writes_scripts(tmp_path):
         smoothing_cutoff=1.0,
         train_split=0.8,
         success_only=True,
+        jobs=None,
     )
     convert_path, aggregate_path, shards_dir, output = slurm_submit._write_scripts(args)
 

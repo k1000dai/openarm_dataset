@@ -42,14 +42,29 @@ def _progress(iterable, desc, total=None):
     return tqdm(iterable, desc=desc, total=total, mininterval=1.0)
 
 
+def available_cpus() -> int:
+    """Count the CPUs actually available to this process.
+
+    Uses the scheduling affinity so a SLURM ``--cpus-per-task`` allocation (or
+    any cgroup/taskset restriction) is respected, instead of the machine's total
+    core count. Falls back to ``os.cpu_count()`` where affinity is unavailable.
+    """
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return len(os.sched_getaffinity(0))
+        except OSError:
+            pass
+    return os.cpu_count() or 1
+
+
 def resolve_jobs(jobs: int | None) -> int:
     """Resolve a ``jobs`` argument to a concrete worker count.
 
-    ``None`` or ``0`` means "use every available core". Negative values are
-    treated as serial (1).
+    ``None`` or ``0`` means "use every available core" (respecting the SLURM /
+    cgroup allocation). Negative values are treated as serial (1).
     """
     if jobs is None or jobs == 0:
-        return os.cpu_count() or 1
+        return available_cpus()
     return max(1, jobs)
 
 
@@ -121,5 +136,4 @@ def ffmpeg_threads_for(jobs: int | None, num_encodes: int) -> int:
     if num_encodes <= 0:
         return 1
     active = min(resolve_jobs(jobs), num_encodes)
-    cores = os.cpu_count() or 1
-    return max(1, cores // active)
+    return max(1, available_cpus() // active)

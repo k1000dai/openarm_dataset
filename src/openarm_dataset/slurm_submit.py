@@ -50,7 +50,7 @@ def _convert_command(python, input_path, shards_dir, args) -> str:
         "--train-split",
         str(args.train_split),
         "--jobs",
-        "${SLURM_CPUS_PER_TASK}",
+        str(args.jobs) if args.jobs is not None else "${SLURM_CPUS_PER_TASK}",
     ]
     if args.success_only:
         parts.append("--success-only")
@@ -194,6 +194,14 @@ def main():
     parser.add_argument("--smoothing-cutoff", type=float, default=1.0)
     parser.add_argument("--train-split", type=float, default=0.8)
     parser.add_argument("--success-only", action="store_true", default=False)
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        help="Worker count inside each shard task (default: use all allocated "
+        "cpus-per-task). Loading is NFS-latency bound, so matching or exceeding "
+        "--cpus-per-task is usually best.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
