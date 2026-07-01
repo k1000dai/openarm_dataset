@@ -57,9 +57,11 @@ Issues = "https://github.com/enactic/openarm_dataset/issues"
 Repository = "https://github.com/enactic/openarm_dataset.git"
 
 [project.scripts]
+openarm-dataset-aggregate = "openarm_dataset.aggregate:main"
 openarm-dataset-convert = "openarm_dataset.convert:main"
 openarm-dataset-merge = "openarm_dataset.merge:main"
 openarm-dataset-repair = "openarm_dataset.repair:main"
+openarm-dataset-slurm-submit = "openarm_dataset.slurm_submit:main"
 openarm-dataset-upload = "openarm_dataset.upload:main"
 openarm-dataset-validate = "openarm_dataset.validate:main"
 

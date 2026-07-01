@@ -78,10 +78,52 @@ def main():
         default="dir",
         choices=["dir", "tar"],
     )
+    parser.add_argument(
+        "--num-shards",
+        help="Convert one shard of the episodes for distributed conversion. "
+        "OUTPUT is treated as the shards directory; this shard is written to "
+        "OUTPUT/shard-<index>/. Requires --shard-index and a lerobot format. "
+        "Aggregate the shards afterwards with openarm-dataset-aggregate.",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
+        "--shard-index",
+        help="Index of the shard to convert (0 <= index < --num-shards)",
+        type=int,
+        default=None,
+    )
 
     args = parser.parse_args()
+
+    lerobot_format = args.format in ("lerobot_v2.1", "lerobot_v3.0", "gr00t")
+
+    if args.num_shards is not None or args.shard_index is not None:
+        if not lerobot_format:
+            parser.error(
+                "--num-shards/--shard-index require --format "
+                "lerobot_v2.1, lerobot_v3.0 or gr00t"
+            )
+        if args.num_shards is None or args.shard_index is None:
+            parser.error("--num-shards and --shard-index must be given together")
+        from .distributed import convert_shard
+
+        convert_shard(
+            args.input,
+            args.output,
+            args.format,
+            args.num_shards,
+            args.shard_index,
+            fps=args.fps,
+            smoothing_cutoff=args.smoothing_cutoff,
+            train_split=args.train_split,
+            success_only=args.success_only,
+            jobs=args.jobs,
+        )
+        return
+
     write_kwargs = {"format": args.format}
-    if args.format in ("lerobot_v2.1", "lerobot_v3.0", "gr00t"):
+    if lerobot_format:
         write_kwargs["fps"] = args.fps
         write_kwargs["smoothing_cutoff"] = args.smoothing_cutoff
         write_kwargs["train_split"] = args.train_split

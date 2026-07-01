@@ -126,19 +126,29 @@ def _process_one_episode(episode_index: int):
 
 
 def _collect_downsampled_data(
-    dataset: Dataset, fps: int, joint_keys, jobs: int | None = None, success_only=False
+    dataset: Dataset,
+    fps: int,
+    joint_keys,
+    jobs: int | None = None,
+    success_only=False,
+    episode_indices=None,
 ):
     """Downsample every (selected) episode in parallel across processes.
 
     Returns ``(records, episode_image_stats)`` — two lists aligned by position
     and ordered exactly as the episodes appear in the metadata, so downstream
     assembly is identical to the serial path.
+
+    ``episode_indices`` explicitly selects which source episodes to process
+    (used by the distributed shard path); when ``None`` all episodes are used,
+    filtered by ``success_only``.
     """
-    episode_indices = [
-        index
-        for index, episode in enumerate(dataset.meta.episodes)
-        if episode["success"] or not success_only
-    ]
+    if episode_indices is None:
+        episode_indices = [
+            index
+            for index, episode in enumerate(dataset.meta.episodes)
+            if episode["success"] or not success_only
+        ]
     results = parallel_map(
         _process_one_episode,
         episode_indices,
@@ -718,6 +728,39 @@ def to_lerobotv21(
     # build remaps from original to contiguous output indices (identity unless filtered)
     remap_episode_index, remap_task_index = _build_remaps(dataset, records)
 
+    _write_v21(
+        dataset,
+        records,
+        episode_image_stats,
+        output_dir,
+        fps,
+        train_split,
+        joint_names,
+        remap_episode_index,
+        remap_task_index,
+        jobs=jobs,
+    )
+
+
+def _write_v21(
+    dataset,
+    records,
+    episode_image_stats,
+    output_dir,
+    fps,
+    train_split,
+    joint_names,
+    remap_episode_index,
+    remap_task_index,
+    jobs=None,
+):
+    """Write parquet, videos, and metadata for the given records and remaps.
+
+    Shared by the normal path (local contiguous remaps) and the distributed
+    shard path (global remaps, local file/row numbering). The row ``index`` and
+    file numbering are always local to ``records``; the distributed aggregate
+    step fixes up the global offsets.
+    """
     # save parquet files for each episode (output_dir/data)
     _write_parquet(
         dataset, records, output_dir, fps, remap_episode_index, remap_task_index

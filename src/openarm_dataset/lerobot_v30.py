@@ -640,6 +640,39 @@ def to_lerobotv30(
 
     remap_episode_index, remap_task_index = _build_remaps(dataset, records)
 
+    _write_v30(
+        dataset,
+        records,
+        episode_image_stats,
+        output_dir,
+        fps,
+        train_split,
+        joint_names,
+        remap_episode_index,
+        remap_task_index,
+        jobs=jobs,
+    )
+
+
+def _write_v30(
+    dataset,
+    records,
+    episode_image_stats,
+    output_dir,
+    fps,
+    train_split,
+    joint_names,
+    remap_episode_index,
+    remap_task_index,
+    jobs=None,
+):
+    """Write packed parquet, videos, episodes/stats, tasks, and info.
+
+    Shared by the normal path (local contiguous remaps) and the distributed
+    shard path (global remaps, local file/row numbering). The row ``index``,
+    ``dataset_from/to_index``, and file numbering are always local to
+    ``records``; the distributed aggregate step fixes up the global offsets.
+    """
     episodes_data_meta, total_frames = _write_packed_parquet(
         dataset, records, output_dir, fps, remap_episode_index, remap_task_index
     )
