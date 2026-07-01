@@ -85,8 +85,10 @@ def parallel_map(
     process-global state it would in a worker.
 
     ``desc`` shows a tqdm progress bar that advances as items complete.
-    Exceptions raised by ``func`` propagate to the caller (fail fast); a partial
-    conversion is not useful.
+    Exceptions raised by ``func`` propagate to the caller, aborting the
+    conversion; a partial result is not useful. This is not fail-fast, though:
+    leaving the ``with`` block waits for the pool to drain, so the error only
+    surfaces once all already-submitted work has finished.
     """
     items = list(items)
     resolved = resolve_jobs(jobs)
